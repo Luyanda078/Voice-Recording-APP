@@ -1,26 +1,24 @@
 import React, { useState, useEffect } from 'react';
-import {
-  View,
-  Text,
-  Button,
-  FlatList,
-  TouchableOpacity,
-  StyleSheet,
-  Alert,
-  Platform,
-} from 'react-native';
+import { Alert, Platform, FlatList, StyleSheet, View, Text, Button } from 'react-native';
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import RecordingItem from './components/RecordingItem';
+import RecordingControls from './components/RecordingControls';
+import RenameRecording from './components/RenameRecording';
+import SearchBar from './components/SearchBar';
 
 const STORAGE_KEY = 'voice_notes'; // Key for AsyncStorage
 
 const VoiceNotesApp = () => {
   const [recordings, setRecordings] = useState([]);
   const [recording, setRecording] = useState(null);
+  const [editingRecording, setEditingRecording] = useState(null);
+  const [newName, setNewName] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [playingRecording, setPlayingRecording] = useState(null); // Track currently playing recording
 
   useEffect(() => {
-    // Load recordings from AsyncStorage and file system
     if (Platform.OS !== 'web') {
       loadRecordings();
     }
@@ -72,16 +70,25 @@ const VoiceNotesApp = () => {
       if (recording) {
         await recording.stopAndUnloadAsync();
         const uri = recording.getURI();
+
+        // Get the duration of the recording
+        const status = await recording.getStatusAsync();
+        const duration = status.durationMillis / 1000; // Duration in seconds
+
         const fileName = `${FileSystem.documentDirectory}${new Date().toISOString()}.m4a`;
 
         if (Platform.OS !== 'web') {
           await FileSystem.moveAsync({ from: uri, to: fileName });
 
-          const newRecording = { uri: fileName, date: new Date().toISOString() };
+          const newRecording = {
+            uri: fileName,
+            date: new Date().toISOString(),
+            name: 'Untitled',
+            duration, // Store the duration
+          };
           const updatedRecordings = [...recordings, newRecording];
           setRecordings(updatedRecordings);
 
-          // Save to AsyncStorage
           saveRecordingsToStorage(updatedRecordings);
         } else {
           Alert.alert('Not Supported', 'Saving recordings is not supported on the web.');
@@ -103,7 +110,6 @@ const VoiceNotesApp = () => {
         );
         setRecordings(updatedRecordings);
 
-        // Update AsyncStorage
         saveRecordingsToStorage(updatedRecordings);
       } else {
         Alert.alert('Not Supported', 'Deleting recordings is not supported on the web.');
@@ -113,47 +119,91 @@ const VoiceNotesApp = () => {
     }
   };
 
-  const renderItem = ({ item }) => (
-    <View style={styles.recordingItem}>
-      <Text>{new Date(item.date).toLocaleString()}</Text>
-      <View style={styles.actions}>
-        <Button
-          title="Play"
-          onPress={async () => {
-            const sound = new Audio.Sound();
-            try {
-              await sound.loadAsync({ uri: item.uri });
-              await sound.playAsync();
-            } catch (error) {
-              console.error('Failed to play recording', error);
-            }
-          }}
-        />
-        <Button
-          title="Delete"
-          color="red"
-          onPress={() => deleteRecording(item.uri)}
-        />
-      </View>
-    </View>
+  const renameRecording = async (uri) => {
+    const recordingToRename = recordings.find((rec) => rec.uri === uri);
+    setEditingRecording(recordingToRename);
+    setNewName(recordingToRename.name);
+  };
+
+  const saveRenamedRecording = () => {
+    if (editingRecording && newName) {
+      const updatedRecordings = recordings.map((rec) =>
+        rec.uri === editingRecording.uri
+          ? { ...rec, name: newName }
+          : rec
+      );
+      setRecordings(updatedRecordings);
+      saveRecordingsToStorage(updatedRecordings);
+      setEditingRecording(null);
+      setNewName('');
+    } else {
+      Alert.alert('Invalid Name', 'Please enter a valid name.');
+    }
+  };
+
+  const playRecording = async (uri) => {
+    if (playingRecording) {
+      await playingRecording.stopAsync();
+      setPlayingRecording(null);
+    }
+
+    const sound = new Audio.Sound();
+    try {
+      await sound.loadAsync({ uri });
+      await sound.playAsync();
+      setPlayingRecording(sound);
+    } catch (error) {
+      console.error('Failed to play recording', error);
+    }
+  };
+
+  const pauseRecording = async () => {
+    if (playingRecording) {
+      await playingRecording.pauseAsync();
+    }
+  };
+
+  const filteredRecordings = recordings.filter((recording) =>
+    recording.name.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Voice Notes</Text>
-      <Button
-        title={recording ? 'Stop Recording' : 'Start Recording'}
-        onPress={recording ? stopRecording : startRecording}
+
+      <SearchBar searchQuery={searchQuery} onSearch={setSearchQuery} />
+
+      <RecordingControls
+        recording={recording}
+        onStartRecording={startRecording}
+        onStopRecording={stopRecording}
       />
+
+      {editingRecording && (
+        <RenameRecording
+          newName={newName}
+          onChangeName={setNewName}
+          onSave={saveRenamedRecording}
+        />
+      )}
+
       {Platform.OS === 'web' ? (
         <Text style={styles.webMessage}>
           Recording functionality is not supported on the web platform.
         </Text>
       ) : (
         <FlatList
-          data={recordings}
+          data={filteredRecordings}
           keyExtractor={(item) => item.uri}
-          renderItem={renderItem}
+          renderItem={({ item }) => (
+            <RecordingItem
+              item={item}
+              onPlay={playRecording}
+              onPause={pauseRecording}
+              onRename={renameRecording}
+              onDelete={deleteRecording}
+            />
+          )}
         />
       )}
     </View>
@@ -171,18 +221,6 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     marginBottom: 20,
     textAlign: 'center',
-  },
-  recordingItem: {
-    padding: 10,
-    marginVertical: 8,
-    borderWidth: 1,
-    borderColor: '#ccc',
-    borderRadius: 5,
-  },
-  actions: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 10,
   },
   webMessage: {
     marginTop: 20,
